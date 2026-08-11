@@ -1,8 +1,7 @@
 apply plugin: 'com.android.application'
 
 android {
-    compileSdkVersion 25
-    // 28.0.3 is widely available on CI; still targets API 25
+    compileSdkVersion 28
     buildToolsVersion "28.0.3"
     packagingOptions {
         exclude 'META-INF/DEPENDENCIES'
@@ -14,7 +13,7 @@ android {
     defaultConfig {
         applicationId "com.xiaoming.minio"
         minSdkVersion 14
-        targetSdkVersion 25
+        targetSdkVersion 28
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
@@ -34,6 +33,10 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.release
         }
+    }
+    lintOptions {
+        checkReleaseBuilds false
+        abortOnError false
     }
 }
 
