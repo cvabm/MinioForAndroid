@@ -3,6 +3,8 @@
 buildscript {
     repositories {
         google()
+        mavenCentral()
+        // jcenter is sunset; keep as fallback for old artifacts
         jcenter()
     }
     dependencies {
@@ -16,6 +18,7 @@ buildscript {
 allprojects {
     repositories {
         google()
+        mavenCentral()
         jcenter()
     }
 }
