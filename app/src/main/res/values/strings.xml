@@ -37,4 +37,14 @@
     <string name="menu_url">复制地址</string>
     <string name="menu_stat">查看信息</string>
     <string name="menu_delete">删除</string>
+    <string name="connect_success">连接成功</string>
+    <string name="connect_failed_title">连接失败</string>
+    <string name="err_unknown_host">无法解析服务器地址。请检查服务地址是否写对，以及手机是否联网。</string>
+    <string name="err_connect">连不上服务器。请确认地址和端口正确，Minio 已启动，且手机与服务器在同一网络。</string>
+    <string name="err_timeout">连接超时。请检查网络，或确认 Minio 服务是否在运行。</string>
+    <string name="err_ssl">HTTPS 证书校验失败。若使用自签证书，请勾选「忽略 HTTPS 证书校验」后再试。</string>
+    <string name="err_auth">账号或密钥不正确。请检查 Access Key / Secret Key。</string>
+    <string name="err_denied">当前账号没有权限访问该服务。</string>
+    <string name="err_endpoint">服务地址格式不正确。请使用类似 http://10.200.100.7:9000 的地址。</string>
+    <string name="err_generic">连接失败：%1$s</string>
 </resources>

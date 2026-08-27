@@ -28,6 +28,10 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -36,9 +40,15 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import javax.net.ssl.SSLException;
+
+import io.minio.ErrorCode;
 import io.minio.MinioClient;
 import io.minio.ObjectStat;
 import io.minio.Result;
+import io.minio.errors.ErrorResponseException;
+import io.minio.errors.InvalidEndpointException;
+import io.minio.errors.InvalidPortException;
 import io.minio.messages.Bucket;
 import io.minio.messages.Item;
 
@@ -156,6 +166,16 @@ public class MainActivity extends AppCompatActivity {
                 sb.append("\n当前桶 ").append(config.bucket).append(exists ? " 存在" : " 不存在");
             }
             return sb.toString();
+        }, new IoResultUi() {
+            @Override
+            public void onSuccess(String result) {
+                toast(getString(R.string.connect_success));
+            }
+
+            @Override
+            public void onFailure(String detail) {
+                showErrorDialog(getString(R.string.connect_failed_title), detail);
+            }
         });
     }
 
@@ -328,7 +348,7 @@ public class MainActivity extends AppCompatActivity {
             objectName = objectOverride != null ? objectOverride : config.requireObject();
             config.requireBucket();
         } catch (IllegalArgumentException e) {
-            toastMissing(e);
+            toast(missingText(e));
             return;
         }
         new AlertDialog.Builder(this)
@@ -374,7 +394,17 @@ public class MainActivity extends AppCompatActivity {
         String run(MinioConfig config) throws Exception;
     }
 
+    private interface IoResultUi {
+        void onSuccess(String result);
+
+        void onFailure(String detail);
+    }
+
     private void runIo(String busyMessage, IoWork work) {
+        runIo(busyMessage, work, null);
+    }
+
+    private void runIo(String busyMessage, IoWork work, IoResultUi ui) {
         if (busy) {
             return;
         }
@@ -387,35 +417,103 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     setBusy(false, null);
                     appendLog(result);
-                    toast("完成");
+                    if (ui != null) {
+                        ui.onSuccess(result);
+                    } else {
+                        toast("完成");
+                    }
                 });
             } catch (IllegalArgumentException e) {
                 runOnUiThread(() -> {
                     setBusy(false, null);
-                    toastMissing(e);
+                    String msg = missingText(e);
+                    appendLog("失败: " + msg);
+                    if (ui != null) {
+                        ui.onFailure(msg);
+                    } else {
+                        toast(msg);
+                    }
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     setBusy(false, null);
-                    String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    String msg = describeError(e);
                     appendLog("失败: " + msg);
-                    toast("失败: " + msg);
+                    if (ui != null) {
+                        ui.onFailure(msg);
+                    } else {
+                        toast("失败: " + msg);
+                    }
                 });
             }
         });
     }
 
-    private void toastMissing(IllegalArgumentException e) {
+    private String missingText(IllegalArgumentException e) {
         String key = e.getMessage();
         if ("endpoint".equals(key)) {
-            toast(getString(R.string.need_endpoint));
-        } else if ("bucket".equals(key)) {
-            toast(getString(R.string.need_bucket));
-        } else if ("object".equals(key)) {
-            toast(getString(R.string.need_object));
-        } else {
-            toast(key);
+            return getString(R.string.need_endpoint);
         }
+        if ("bucket".equals(key)) {
+            return getString(R.string.need_bucket);
+        }
+        if ("object".equals(key)) {
+            return getString(R.string.need_object);
+        }
+        return key;
+    }
+
+    private String describeError(Throwable error) {
+        Throwable t = error;
+        for (int i = 0; t != null && i < 8; i++) {
+            if (t instanceof UnknownHostException) {
+                return getString(R.string.err_unknown_host);
+            }
+            if (t instanceof ConnectException || t instanceof NoRouteToHostException) {
+                return getString(R.string.err_connect);
+            }
+            if (t instanceof SocketTimeoutException) {
+                return getString(R.string.err_timeout);
+            }
+            if (t instanceof SSLException) {
+                return getString(R.string.err_ssl);
+            }
+            if (t instanceof InvalidEndpointException || t instanceof InvalidPortException) {
+                return getString(R.string.err_endpoint);
+            }
+            if (t instanceof ErrorResponseException) {
+                ErrorResponseException ere = (ErrorResponseException) t;
+                ErrorCode code = ere.errorResponse() == null ? null : ere.errorResponse().errorCode();
+                if (code == ErrorCode.INVALID_ACCESS_KEY_ID || code == ErrorCode.SIGNATURE_DOES_NOT_MATCH) {
+                    return getString(R.string.err_auth);
+                }
+                if (code == ErrorCode.ACCESS_DENIED) {
+                    return getString(R.string.err_denied);
+                }
+                String serverMsg = ere.getMessage();
+                if (TextUtils.isEmpty(serverMsg) && code != null) {
+                    serverMsg = code.message();
+                }
+                return getString(R.string.err_generic, TextUtils.isEmpty(serverMsg) ? t.getClass().getSimpleName() : serverMsg);
+            }
+            t = t.getCause();
+        }
+        String msg = error.getMessage();
+        if (TextUtils.isEmpty(msg)) {
+            msg = error.getClass().getSimpleName();
+        }
+        return getString(R.string.err_generic, msg);
+    }
+
+    private void showErrorDialog(String title, String message) {
+        if (isFinishing()) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
     }
 
     private void setBusy(boolean value, String message) {
