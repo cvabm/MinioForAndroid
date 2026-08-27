@@ -1,11 +1,17 @@
 package com.xiaoming.minio;
 
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.text.TextUtils;
 import android.view.View;
@@ -17,6 +23,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.FileProvider;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -31,6 +38,7 @@ import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
+import java.net.URLConnection;
 import java.net.UnknownHostException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -47,6 +55,7 @@ import io.minio.MinioClient;
 import io.minio.ObjectStat;
 import io.minio.Result;
 import io.minio.errors.ErrorResponseException;
+import io.minio.errors.InvalidBucketNameException;
 import io.minio.errors.InvalidEndpointException;
 import io.minio.errors.InvalidPortException;
 import io.minio.messages.Bucket;
@@ -60,6 +69,9 @@ public class MainActivity extends AppCompatActivity {
     private final SimpleDateFormat timeFmt = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
     private final SimpleDateFormat dateFmt = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault());
     private boolean busy;
+    private Uri lastDownloadUri;
+    private String lastDownloadName;
+    private String lastDownloadMime;
 
     private final ActivityResultLauncher<String> pickFile =
             registerForActivityResult(new ActivityResultContracts.GetContent(), this::onFilePicked);
@@ -285,28 +297,33 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void downloadObject(@Nullable String objectOverride) {
+        lastDownloadUri = null;
+        lastDownloadName = null;
+        lastDownloadMime = null;
         runIo("正在下载…", config -> {
             String bucket = config.requireBucket();
             String objectName = objectOverride != null ? objectOverride : config.requireObject();
             MinioClient client = config.createClient();
-            File dir = getExternalFilesDir(null);
-            if (dir == null) {
-                dir = getFilesDir();
-            }
             String fileName = objectName.contains("/")
                     ? objectName.substring(objectName.lastIndexOf('/') + 1)
                     : objectName;
-            File dest = new File(dir, fileName);
-            try (InputStream in = client.getObject(bucket, objectName);
-                 OutputStream out = new FileOutputStream(dest)) {
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) != -1) {
-                    out.write(buf, 0, n);
-                }
-                out.flush();
+            if (TextUtils.isEmpty(fileName)) {
+                fileName = "download.bin";
             }
-            return "下载成功\n  对象: " + objectName + "\n  保存到: " + dest.getAbsolutePath();
+            try (InputStream in = client.getObject(bucket, objectName)) {
+                lastDownloadUri = saveToPublicDownloads(fileName, in);
+            }
+            return "下载成功\n  对象: " + objectName + "\n  保存到: 下载/" + lastDownloadName;
+        }, new IoResultUi() {
+            @Override
+            public void onSuccess(String result) {
+                showDownloadDoneDialog(lastDownloadUri, lastDownloadName, lastDownloadMime);
+            }
+
+            @Override
+            public void onFailure(String detail) {
+                toast("失败: " + detail);
+            }
         });
     }
 
@@ -315,14 +332,14 @@ public class MainActivity extends AppCompatActivity {
             String bucket = config.requireBucket();
             String objectName = objectOverride != null ? objectOverride : config.requireObject();
             MinioClient client = config.createClient();
-            String url = client.getObjectUrl(bucket, objectName);
+            String url = client.presignedGetObject(bucket, objectName);
             runOnUiThread(() -> {
                 ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                 if (clipboard != null) {
                     clipboard.setPrimaryClip(ClipData.newPlainText("minio-url", url));
                 }
             });
-            return "对象地址（已复制）\n" + url;
+            return getString(R.string.object_url_copied) + "\n" + url;
         });
     }
 
@@ -365,6 +382,19 @@ public class MainActivity extends AppCompatActivity {
             MinioClient client = config.createClient();
             client.removeObject(bucket, objectName);
             return "已删除对象: " + objectName;
+        }, new IoResultUi() {
+            @Override
+            public void onSuccess(String result) {
+                adapter.removeByName(objectName);
+                binding.emptyObjects.setVisibility(
+                        adapter.getItemCount() == 0 ? View.VISIBLE : View.GONE);
+                toast("完成");
+            }
+
+            @Override
+            public void onFailure(String detail) {
+                toast("失败: " + detail);
+            }
         });
     }
 
@@ -481,6 +511,9 @@ public class MainActivity extends AppCompatActivity {
             if (t instanceof InvalidEndpointException || t instanceof InvalidPortException) {
                 return getString(R.string.err_endpoint);
             }
+            if (t instanceof InvalidBucketNameException) {
+                return getString(R.string.err_bucket_name);
+            }
             if (t instanceof ErrorResponseException) {
                 ErrorResponseException ere = (ErrorResponseException) t;
                 ErrorCode code = ere.errorResponse() == null ? null : ere.errorResponse().errorCode();
@@ -489,6 +522,15 @@ public class MainActivity extends AppCompatActivity {
                 }
                 if (code == ErrorCode.ACCESS_DENIED) {
                     return getString(R.string.err_denied);
+                }
+                if (code == ErrorCode.NO_SUCH_BUCKET) {
+                    return getString(R.string.err_no_bucket);
+                }
+                if (code == ErrorCode.NO_SUCH_OBJECT) {
+                    return getString(R.string.err_no_object);
+                }
+                if (code == ErrorCode.INVALID_BUCKET_NAME) {
+                    return getString(R.string.err_bucket_name);
                 }
                 String serverMsg = ere.getMessage();
                 if (TextUtils.isEmpty(serverMsg) && code != null) {
@@ -514,6 +556,112 @@ public class MainActivity extends AppCompatActivity {
                 .setMessage(message)
                 .setPositiveButton(android.R.string.ok, null)
                 .show();
+    }
+
+    private void showDownloadDoneDialog(Uri uri, String name, String mime) {
+        if (isFinishing()) {
+            return;
+        }
+        String display = TextUtils.isEmpty(name) ? "download.bin" : name;
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.download_success_title)
+                .setMessage(getString(R.string.download_success_message, display))
+                .setNegativeButton(android.R.string.ok, null)
+                .setPositiveButton(R.string.download_open, (d, w) -> openDownloaded(uri, mime))
+                .show();
+    }
+
+    private void openDownloaded(Uri uri, String mime) {
+        if (uri == null) {
+            toast(getString(R.string.download_open_failed));
+            return;
+        }
+        String type = TextUtils.isEmpty(mime) ? "*/*" : mime;
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(uri, type);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(Intent.createChooser(intent, getString(R.string.download_open)));
+        } catch (ActivityNotFoundException e) {
+            toast(getString(R.string.download_open_failed));
+        }
+    }
+
+    private Uri saveToPublicDownloads(String fileName, InputStream in) throws Exception {
+        String safeName = fileName.replace('/', '_').replace('\\', '_');
+        if (TextUtils.isEmpty(safeName)) {
+            safeName = "download.bin";
+        }
+        String mime = URLConnection.guessContentTypeFromName(safeName);
+        if (TextUtils.isEmpty(mime)) {
+            mime = "application/octet-stream";
+        }
+        lastDownloadMime = mime;
+
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeName);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            ContentResolver resolver = getContentResolver();
+            Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) {
+                throw new IllegalStateException("无法写入系统下载目录");
+            }
+            try {
+                try (OutputStream out = resolver.openOutputStream(uri)) {
+                    if (out == null) {
+                        throw new IllegalStateException("无法写入系统下载目录");
+                    }
+                    copyStream(in, out);
+                }
+                values.clear();
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                resolver.update(uri, values, null, null);
+            } catch (Exception e) {
+                resolver.delete(uri, null, null);
+                throw e;
+            }
+            lastDownloadName = safeName;
+            return uri;
+        }
+
+        File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        if (dir != null && !dir.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            dir.mkdirs();
+        }
+        if (dir == null || !dir.isDirectory()) {
+            throw new IllegalStateException("无法访问系统下载目录");
+        }
+        File dest = uniqueFile(dir, safeName);
+        try (OutputStream out = new FileOutputStream(dest)) {
+            copyStream(in, out);
+        }
+        lastDownloadName = dest.getName();
+        return FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", dest);
+    }
+
+    private static File uniqueFile(File dir, String fileName) {
+        File dest = new File(dir, fileName);
+        if (!dest.exists()) {
+            return dest;
+        }
+        String base = fileName;
+        String ext = "";
+        int dot = fileName.lastIndexOf('.');
+        if (dot > 0) {
+            base = fileName.substring(0, dot);
+            ext = fileName.substring(dot);
+        }
+        for (int i = 1; i < 1000; i++) {
+            dest = new File(dir, base + " (" + i + ")" + ext);
+            if (!dest.exists()) {
+                return dest;
+            }
+        }
+        return new File(dir, base + "-" + System.currentTimeMillis() + ext);
     }
 
     private void setBusy(boolean value, String message) {

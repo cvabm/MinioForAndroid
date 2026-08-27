@@ -46,5 +46,13 @@
     <string name="err_auth">账号或密钥不正确。请检查 Access Key / Secret Key。</string>
     <string name="err_denied">当前账号没有权限访问该服务。</string>
     <string name="err_endpoint">服务地址格式不正确。请使用类似 http://10.200.100.7:9000 的地址。</string>
-    <string name="err_generic">连接失败：%1$s</string>
+    <string name="err_no_bucket">指定的桶不存在。请检查 Bucket 名称，或先创建桶。</string>
+    <string name="err_no_object">指定的对象不存在。请检查对象名，或从列表重新点选。</string>
+    <string name="err_bucket_name">Bucket 名称不合法。请使用小写字母、数字和连字符，不要有空格。</string>
+    <string name="err_generic">操作失败：%1$s</string>
+    <string name="object_url_copied">对象地址（预签名，约 7 天有效，已复制）</string>
+    <string name="download_success_title">下载完成</string>
+    <string name="download_success_message">已保存到系统「下载」目录：\n%1$s</string>
+    <string name="download_open">打开</string>
+    <string name="download_open_failed">没有应用可以打开该文件</string>
 </resources>

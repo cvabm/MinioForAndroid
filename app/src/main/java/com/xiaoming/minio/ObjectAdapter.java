@@ -34,6 +34,18 @@ final class ObjectAdapter extends RecyclerView.Adapter<ObjectAdapter.Holder> {
         notifyDataSetChanged();
     }
 
+    void removeByName(String name) {
+        if (name == null) {
+            return;
+        }
+        for (int i = items.size() - 1; i >= 0; i--) {
+            if (name.equals(items.get(i).name)) {
+                items.remove(i);
+                notifyItemRemoved(i);
+            }
+        }
+    }
+
     @NonNull
     @Override
     public Holder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
