@@ -1,131 +1,497 @@
 package com.xiaoming.minio;
 
-import android.app.ProgressDialog;
-import android.os.Environment;
-import android.os.Handler;
-import android.os.Message;
-import android.support.v4.app.ActivityCompat;
-import android.support.v7.app.AppCompatActivity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.ContentResolver;
+import android.database.Cursor;
+import android.net.Uri;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
+import android.text.TextUtils;
 import android.view.View;
+import android.widget.PopupMenu;
 import android.widget.Toast;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.recyclerview.widget.LinearLayoutManager;
+
+import com.xiaoming.minio.databinding.ActivityMainBinding;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import io.minio.MinioClient;
+import io.minio.ObjectStat;
+import io.minio.Result;
+import io.minio.messages.Bucket;
+import io.minio.messages.Item;
 
 public class MainActivity extends AppCompatActivity {
 
-    private final static String IP = "http://10.200.100.7:9000"; // 你的minio服务器地址
-    private final static String ACCESSKEY = "minioadmin"; // 你的minio服务器账号
-    private final static String SECRETKEY = "minioadmin"; // 你的minio服务器账号秘钥
-    private final static String BUCKET_NAME = "padlogs"; // 你的minio服务器BUCKET
-    private final static String FILE_NAME = "img_banner_01.png"; // 你要存在minio服务器上的文件名
-    private static String FILE_PATH = Environment.getExternalStorageDirectory().getAbsolutePath() + File.separator + "minio" + File.separator;
+    private ActivityMainBinding binding;
+    private ObjectAdapter adapter;
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final SimpleDateFormat timeFmt = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
+    private final SimpleDateFormat dateFmt = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault());
+    private boolean busy;
 
-    private ProgressDialog dialog;
-
-    private Handler mHandler = new Handler() {
-
-        @Override
-        public void handleMessage(Message msg) {
-            super.handleMessage(msg);
-            switch (msg.what) {
-                case 1: // 图片上传minio成功
-                    Toast.makeText(MainActivity.this, "图片上minio成功", Toast.LENGTH_SHORT).show();
-                    break;
-                case 2: // 图片上传minio失败
-                    Toast.makeText(MainActivity.this, "图片上minio失败", Toast.LENGTH_SHORT).show();
-                    break;
-                case 3: // 图片上传minio失败
-                    Toast.makeText(MainActivity.this, "图片获取成功", Toast.LENGTH_SHORT).show();
-                    break;
-            }
-            if (dialog != null)
-                dialog.dismiss();
-        }
-    };
+    private final ActivityResultLauncher<String> pickFile =
+            registerForActivityResult(new ActivityResultContracts.GetContent(), this::onFilePicked);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+        binding = ActivityMainBinding.inflate(getLayoutInflater());
+        setContentView(binding.getRoot());
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().hide();
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(binding.getRoot(), (v, insets) -> {
+            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return insets;
+        });
 
-        // 申请权限
-        String[] perms = new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE};
-        ActivityCompat.requestPermissions(this, perms, 0xFF);
+        adapter = new ObjectAdapter(new ObjectAdapter.Listener() {
+            @Override
+            public void onClick(ObjectRow row) {
+                binding.objectName.setText(row.name);
+                appendLog("已选中对象: " + row.name);
+            }
+
+            @Override
+            public void onLongClick(View anchor, ObjectRow row) {
+                binding.objectName.setText(row.name);
+                showObjectMenu(anchor, row);
+            }
+        });
+        binding.objectList.setLayoutManager(new LinearLayoutManager(this));
+        binding.objectList.setAdapter(adapter);
+        binding.objectList.setNestedScrollingEnabled(false);
+
+        bindConfig(MinioConfig.load(this));
+        appendLog("就绪。先保存或确认连接配置，再执行操作。");
+
+        binding.saveConfig.setOnClickListener(v -> {
+            readForm().save(this);
+            toast(getString(R.string.saved));
+            appendLog("配置已保存");
+        });
+        binding.restoreDefaults.setOnClickListener(v -> {
+            MinioConfig defaults = MinioConfig.defaults();
+            bindConfig(defaults);
+            defaults.save(this);
+            toast(getString(R.string.restored));
+            appendLog("已恢复默认配置");
+        });
+        binding.testConnection.setOnClickListener(v -> testConnection());
+        binding.listBuckets.setOnClickListener(v -> listBuckets());
+        binding.createBucket.setOnClickListener(v -> createBucket());
+        binding.listObjects.setOnClickListener(v -> listObjects());
+        binding.uploadSample.setOnClickListener(v -> uploadSample());
+        binding.uploadFile.setOnClickListener(v -> pickFile.launch("*/*"));
+        binding.downloadObject.setOnClickListener(v -> downloadObject(null));
+        binding.objectUrl.setOnClickListener(v -> copyObjectUrl(null));
+        binding.objectStat.setOnClickListener(v -> showObjectStat(null));
+        binding.deleteObject.setOnClickListener(v -> confirmDelete(null));
+        binding.clearLog.setOnClickListener(v -> binding.logView.setText(""));
     }
 
-    public void OnClick(View v) {
-        dialog = ProgressDialog.show(this, "请稍后", "我正在上Minio,不要心急!");
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                // 给本地文件夹写入图片
-                File dir = new File(FILE_PATH);
-                if (!dir.exists()) {
-                    dir.mkdirs();
-                }
-                FILE_PATH += "test.png";
-                File file = new File(FILE_PATH);
-                InputStream is = null;
-                OutputStream os = null;
-                try {
-                    is = getAssets().open("img_banner_01.png");
-                    os = new FileOutputStream(file);
-                    int ch = 0;
-                    while ((ch = is.read()) != -1) {
-                        os.write(ch);
-                    }
-                    os.flush();
-                } catch (Exception e) {
-                    e.printStackTrace();
-                } finally {
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        io.shutdownNow();
+    }
+
+    private void bindConfig(MinioConfig config) {
+        binding.endpoint.setText(config.endpoint);
+        binding.accessKey.setText(config.accessKey);
+        binding.secretKey.setText(config.secretKey);
+        binding.bucket.setText(config.bucket);
+        binding.objectName.setText(config.objectName);
+        binding.ignoreCert.setChecked(config.ignoreCert);
+    }
+
+    private MinioConfig readForm() {
+        MinioConfig config = new MinioConfig();
+        config.endpoint = text(binding.endpoint);
+        config.accessKey = text(binding.accessKey);
+        config.secretKey = text(binding.secretKey);
+        config.bucket = text(binding.bucket);
+        config.objectName = text(binding.objectName);
+        config.ignoreCert = binding.ignoreCert.isChecked();
+        return config;
+    }
+
+    private static String text(android.widget.EditText view) {
+        return view.getText() == null ? "" : view.getText().toString().trim();
+    }
+
+    private void testConnection() {
+        runIo("正在测试连接…", config -> {
+            MinioClient client = config.createClient();
+            List<Bucket> buckets = client.listBuckets();
+            StringBuilder sb = new StringBuilder("连接成功，共 ").append(buckets.size()).append(" 个桶");
+            for (Bucket bucket : buckets) {
+                sb.append("\n  - ").append(bucket.name());
+            }
+            if (!TextUtils.isEmpty(config.bucket)) {
+                boolean exists = client.bucketExists(config.bucket.trim());
+                sb.append("\n当前桶 ").append(config.bucket).append(exists ? " 存在" : " 不存在");
+            }
+            return sb.toString();
+        });
+    }
+
+    private void listBuckets() {
+        runIo("正在列出桶…", config -> {
+            MinioClient client = config.createClient();
+            List<Bucket> buckets = client.listBuckets();
+            List<String> names = new ArrayList<>();
+            StringBuilder sb = new StringBuilder("桶列表 (").append(buckets.size()).append(")");
+            for (Bucket bucket : buckets) {
+                names.add(bucket.name());
+                sb.append("\n  - ").append(bucket.name());
+            }
+            runOnUiThread(() -> showBucketPicker(names));
+            return sb.toString();
+        });
+    }
+
+    private void showBucketPicker(List<String> names) {
+        if (names == null || names.isEmpty()) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.pick_bucket_title)
+                .setItems(names.toArray(new String[0]), (dialog, which) -> {
+                    binding.bucket.setText(names.get(which));
+                    appendLog("已填入 Bucket: " + names.get(which));
+                })
+                .show();
+    }
+
+    private void createBucket() {
+        runIo("正在创建桶…", config -> {
+            String bucket = config.requireBucket();
+            MinioClient client = config.createClient();
+            if (client.bucketExists(bucket)) {
+                return "桶已存在: " + bucket;
+            }
+            client.makeBucket(bucket);
+            return "已创建桶: " + bucket;
+        });
+    }
+
+    private void listObjects() {
+        runIo("正在列出对象…", config -> {
+            String bucket = config.requireBucket();
+            MinioClient client = config.createClient();
+            List<ObjectRow> rows = new ArrayList<>();
+            int count = 0;
+            for (Result<Item> result : client.listObjects(bucket, "", true)) {
+                Item item = result.get();
+                count++;
+                String modified = "";
+                long size = 0;
+                if (!item.isDir()) {
+                    size = item.objectSize();
                     try {
-                        os.close();
-                    } catch (Exception e) {
-                        e.printStackTrace();
+                        Date date = item.lastModified();
+                        if (date != null) {
+                            modified = dateFmt.format(date);
+                        }
+                    } catch (Exception ignored) {
                     }
                 }
-
-                // 上传图片到minio服务器
-                try {
-                    MinioClient minioClient = new MinioClient(IP, ACCESSKEY, SECRETKEY);
-                    boolean isExist = minioClient.bucketExists(BUCKET_NAME);
-                    if (isExist) {
-                        System.out.println("--Bucket already exists.");
-                    } else {
-                        minioClient.makeBucket(BUCKET_NAME);
-                    }
-                    minioClient.putObject(BUCKET_NAME, FILE_NAME, FILE_PATH);
-                    System.out.print("--" + FILE_PATH + "上传成功");
-                    mHandler.sendEmptyMessage(1);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                    mHandler.sendEmptyMessage(2);
-                }
+                rows.add(new ObjectRow(item.objectName(), size, modified, item.isDir()));
             }
-        }).start();
+            final List<ObjectRow> uiRows = rows;
+            runOnUiThread(() -> {
+                adapter.submit(uiRows);
+                binding.emptyObjects.setVisibility(uiRows.isEmpty() ? View.VISIBLE : View.GONE);
+            });
+            return "列出对象完成，共 " + count + " 项（桶: " + bucket + "）";
+        });
     }
 
-    public void OnClick2(View view) {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    MinioClient minioClient = new MinioClient(IP, ACCESSKEY, SECRETKEY);
-                    String objectUrl = minioClient.getObjectUrl(BUCKET_NAME, FILE_NAME);
-                    mHandler.sendEmptyMessage(3);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                    mHandler.sendEmptyMessage(2);
+    private void uploadSample() {
+        runIo("正在上传示例图…", config -> {
+            String bucket = config.requireBucket();
+            String objectName = TextUtils.isEmpty(config.objectName)
+                    ? MinioConfig.DEFAULT_OBJECT
+                    : config.objectName.trim();
+            File file = copyAsset("img_banner_01.png", "sample.png");
+            MinioClient client = config.createClient();
+            ensureBucket(client, bucket);
+            client.putObject(bucket, objectName, file.getAbsolutePath());
+            return "上传成功\n  桶: " + bucket + "\n  对象: " + objectName + "\n  本地: " + file.getAbsolutePath();
+        });
+    }
+
+    private void onFilePicked(@Nullable Uri uri) {
+        if (uri == null) {
+            appendLog("未选择文件");
+            return;
+        }
+        runIo("正在上传文件…", config -> {
+            String bucket = config.requireBucket();
+            String displayName = queryDisplayName(uri);
+            String objectName = TextUtils.isEmpty(config.objectName) ? displayName : config.objectName.trim();
+            File file = copyUri(uri, displayName);
+            MinioClient client = config.createClient();
+            ensureBucket(client, bucket);
+            client.putObject(bucket, objectName, file.getAbsolutePath());
+            final String filled = objectName;
+            runOnUiThread(() -> binding.objectName.setText(filled));
+            return "上传成功\n  桶: " + bucket + "\n  对象: " + objectName + "\n  文件: " + displayName;
+        });
+    }
+
+    private void downloadObject(@Nullable String objectOverride) {
+        runIo("正在下载…", config -> {
+            String bucket = config.requireBucket();
+            String objectName = objectOverride != null ? objectOverride : config.requireObject();
+            MinioClient client = config.createClient();
+            File dir = getExternalFilesDir(null);
+            if (dir == null) {
+                dir = getFilesDir();
+            }
+            String fileName = objectName.contains("/")
+                    ? objectName.substring(objectName.lastIndexOf('/') + 1)
+                    : objectName;
+            File dest = new File(dir, fileName);
+            try (InputStream in = client.getObject(bucket, objectName);
+                 OutputStream out = new FileOutputStream(dest)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    out.write(buf, 0, n);
+                }
+                out.flush();
+            }
+            return "下载成功\n  对象: " + objectName + "\n  保存到: " + dest.getAbsolutePath();
+        });
+    }
+
+    private void copyObjectUrl(@Nullable String objectOverride) {
+        runIo("正在获取地址…", config -> {
+            String bucket = config.requireBucket();
+            String objectName = objectOverride != null ? objectOverride : config.requireObject();
+            MinioClient client = config.createClient();
+            String url = client.getObjectUrl(bucket, objectName);
+            runOnUiThread(() -> {
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("minio-url", url));
+                }
+            });
+            return "对象地址（已复制）\n" + url;
+        });
+    }
+
+    private void showObjectStat(@Nullable String objectOverride) {
+        runIo("正在读取对象信息…", config -> {
+            String bucket = config.requireBucket();
+            String objectName = objectOverride != null ? objectOverride : config.requireObject();
+            MinioClient client = config.createClient();
+            ObjectStat stat = client.statObject(bucket, objectName);
+            return "对象信息\n  桶: " + stat.bucketName()
+                    + "\n  名称: " + stat.name()
+                    + "\n  大小: " + ObjectAdapter.formatSize(stat.length())
+                    + "\n  类型: " + stat.contentType()
+                    + "\n  ETag: " + stat.etag()
+                    + "\n  时间: " + (stat.createdTime() == null ? "-" : dateFmt.format(stat.createdTime()));
+        });
+    }
+
+    private void confirmDelete(@Nullable String objectOverride) {
+        MinioConfig config = readForm();
+        final String objectName;
+        try {
+            objectName = objectOverride != null ? objectOverride : config.requireObject();
+            config.requireBucket();
+        } catch (IllegalArgumentException e) {
+            toastMissing(e);
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.confirm_delete_title)
+                .setMessage(getString(R.string.confirm_delete_message, objectName))
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(android.R.string.ok, (d, w) -> deleteObject(objectName))
+                .show();
+    }
+
+    private void deleteObject(String objectName) {
+        runIo("正在删除…", config -> {
+            String bucket = config.requireBucket();
+            MinioClient client = config.createClient();
+            client.removeObject(bucket, objectName);
+            return "已删除对象: " + objectName;
+        });
+    }
+
+    private void showObjectMenu(View anchor, ObjectRow row) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add(0, 1, 0, R.string.menu_download);
+        menu.getMenu().add(0, 2, 1, R.string.menu_url);
+        menu.getMenu().add(0, 3, 2, R.string.menu_stat);
+        menu.getMenu().add(0, 4, 3, R.string.menu_delete);
+        menu.setOnMenuItemClickListener(item -> {
+            int id = item.getItemId();
+            if (id == 1) {
+                downloadObject(row.name);
+            } else if (id == 2) {
+                copyObjectUrl(row.name);
+            } else if (id == 3) {
+                showObjectStat(row.name);
+            } else if (id == 4) {
+                confirmDelete(row.name);
+            }
+            return true;
+        });
+        menu.show();
+    }
+
+    private interface IoWork {
+        String run(MinioConfig config) throws Exception;
+    }
+
+    private void runIo(String busyMessage, IoWork work) {
+        if (busy) {
+            return;
+        }
+        MinioConfig config = readForm();
+        config.save(this);
+        setBusy(true, busyMessage);
+        io.execute(() -> {
+            try {
+                String result = work.run(config);
+                runOnUiThread(() -> {
+                    setBusy(false, null);
+                    appendLog(result);
+                    toast("完成");
+                });
+            } catch (IllegalArgumentException e) {
+                runOnUiThread(() -> {
+                    setBusy(false, null);
+                    toastMissing(e);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false, null);
+                    String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    appendLog("失败: " + msg);
+                    toast("失败: " + msg);
+                });
+            }
+        });
+    }
+
+    private void toastMissing(IllegalArgumentException e) {
+        String key = e.getMessage();
+        if ("endpoint".equals(key)) {
+            toast(getString(R.string.need_endpoint));
+        } else if ("bucket".equals(key)) {
+            toast(getString(R.string.need_bucket));
+        } else if ("object".equals(key)) {
+            toast(getString(R.string.need_object));
+        } else {
+            toast(key);
+        }
+    }
+
+    private void setBusy(boolean value, String message) {
+        busy = value;
+        binding.busyOverlay.setVisibility(value ? View.VISIBLE : View.GONE);
+        if (message != null) {
+            binding.busyText.setText(message);
+        }
+    }
+
+    private void appendLog(String message) {
+        String line = "[" + timeFmt.format(new Date()) + "] " + message;
+        CharSequence old = binding.logView.getText();
+        if (TextUtils.isEmpty(old)) {
+            binding.logView.setText(line);
+        } else {
+            binding.logView.setText(old + "\n" + line);
+        }
+    }
+
+    private void toast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
+    private static void ensureBucket(MinioClient client, String bucket) throws Exception {
+        if (!client.bucketExists(bucket)) {
+            client.makeBucket(bucket);
+        }
+    }
+
+    private File copyAsset(String assetName, String outName) throws Exception {
+        File dir = getExternalFilesDir(null);
+        if (dir == null) {
+            dir = getFilesDir();
+        }
+        File out = new File(dir, outName);
+        try (InputStream in = getAssets().open(assetName);
+             OutputStream os = new FileOutputStream(out)) {
+            copyStream(in, os);
+        }
+        return out;
+    }
+
+    private File copyUri(Uri uri, String name) throws Exception {
+        File out = new File(getCacheDir(), name);
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             OutputStream os = new FileOutputStream(out)) {
+            if (in == null) {
+                throw new IllegalStateException("无法读取所选文件");
+            }
+            copyStream(in, os);
+        }
+        return out;
+    }
+
+    private static void copyStream(InputStream in, OutputStream out) throws Exception {
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) != -1) {
+            out.write(buf, 0, n);
+        }
+        out.flush();
+    }
+
+    private String queryDisplayName(Uri uri) {
+        ContentResolver resolver = getContentResolver();
+        try (Cursor cursor = resolver.query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String name = cursor.getString(0);
+                if (!TextUtils.isEmpty(name)) {
+                    return name;
                 }
             }
-        }).start();
-        // 上传图片到minio服务器
-
+        } catch (Exception ignored) {
+        }
+        String last = uri.getLastPathSegment();
+        return TextUtils.isEmpty(last) ? "upload.bin" : last;
     }
 }
